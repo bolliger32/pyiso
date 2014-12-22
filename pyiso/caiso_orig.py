@@ -3,51 +3,6 @@ from pyiso.base import BaseClient
 import copy
 import re
 from bs4 import BeautifulSoup
-import time
-import pdb
-
-# PRC_LMP
-# PRC_HASP_LMP
-# PRC_RTPD_LMP
-# PRC_INTVL_LMP
-# PRC_AS - All Ancillary Services for Region and Sub-Regional Partition. Posted hourly in $/MW for the DAM and HASP.
-# PRC_INVL_AS - Posts 15-Minute price relevant to the next 15 minute binding interval for RTM
-
-# PRC_CURR_LMP - Posts all LMP data for the most current interval
-
-"""
-Returned data is a list of dicts, each of which has a time code as the main term which is used for indexing.  e.g. the following is the result of this code:
-mycaiso = caiso.CAISOClient()
-mydata = mycaiso.get_generation(latest=True)
-mydata
-[{'timestamp': datetime.datetime(2014, 12, 11, 6, 20, tzinfo=<UTC>), 'gen_MW': 1678.0, 'fuel_name': 'renewable', 'ba_name': 'CAISO', 'freq': '10m', 'market': 'RT5M'},
- {'timestamp': datetime.datetime(2014, 12, 11, 6, 20, tzinfo=<UTC>), 'gen_MW': 447.0, 'fuel_name': 'wind', 'ba_name': 'CAISO', 'freq': '10m', 'market': 'RT5M'},
- {'gen_MW': 26155.37, 'ba_name': 'CAISO', 'timestamp': datetime.datetime(2014, 12, 11, 6, 20, tzinfo=<UTC>), 'freq': '10m', 'fuel_name': 'other', 'market': 'RT5M'}]
-
-this can then be pulled into a pandas dataframe:
-
-import pandas as pd
-df = pd.DataFrame(data)
-"""
-"""
-fruitful methods:
-get_generation(self, latest=False, yesterday=False,start_at=False, end_at=False, **kwargs):
-get_load(self, latest=False,start_at=False, end_at=False, **kwargs)
-get_trade(self, latest=False, start_at=False, end_at=False, **kwargs)
-get_lmp(self, latest=False,start_at=False, end_at=False, market='hourly', grp_type='ALL',node='ALL',**kwargs)
-
-construct_oasis_payload(self, queryname, preferred_start_at=None, **kwargs)
-fetch_oasis(self, payload={})
-
-parsing methods:
-parse_generation
-parse_lmp(self,raw_data)
-parse_oasis_slrs(self, raw_data)
-parse_oasis_renewable(self, raw_data)
-parse_oasis_demand_forecast(self, raw_data)
-parse_todays_outlook_renewables(self, soup, ts)
-
-"""
 
 
 class CAISOClient(BaseClient):
@@ -81,9 +36,9 @@ class CAISOClient(BaseClient):
         'HYDRO': 'hydro',            
     }
 
-    oasis_markets = {                               # {'RT5M': 'RTM', 'DAHR': 'DAM', 'RTHR': 'HASP'}
-        BaseClient.MARKET_CHOICES.hourly: 'HASP', 
-        BaseClient.MARKET_CHOICES.fivemin: 'RTM',  # There are actually three codes used: RTPD (Real-time Pre-dispatch), RTD (real-time dispatch), and RTM (Real-Time Market). I can't figure out what the difference is.
+    oasis_markets = {
+        BaseClient.MARKET_CHOICES.hourly: 'RTM',
+        BaseClient.MARKET_CHOICES.fivemin: 'RTM',
         BaseClient.MARKET_CHOICES.dam: 'DAM',
     }
 
@@ -111,231 +66,6 @@ class CAISOClient(BaseClient):
             return self._generation_forecast()
         else:
             return self._generation_historical()
-
-    
-
-    def get_lmp(self, latest=False,
-                       start_at=False, end_at=False, market='hourly', grp_type='ALL',node='ALL',csv=False, **kwargs):
-        # Construct_oasis_payload expects market option to be one of 'hourly', 'fivemin', 'tenmin', 'na', 'dam'
-        
-        # if csv = False, pulls xml files, parses SLOWLY, and returned data is 
-        # a list of dicts, each of which has a main index of the timestamp
-        
-        # if csv=True, pulls csv files, parses more quickly, and returns Pandas
-        # Panel data structure
-        
-        
-        # Expected parameters:
-        #  node: CAISO node ID.  Can be set to individual node or "ALL".  "ALL" will override grp_type
-        #  grp_type: either "ALL_APNodes" or "ALL" - This will trigger day-by-day iteration
-        #      NOTE: This needs to be turned off for processing individual nodes.  This will override node types
-        #  market= "DAM", "HASP", "RTM"
-        #  start_at and end_at can be a variety of parsable input types, with or without time codes
-        #      i.e. '2013-10-12T11:45:30' or '2011-10-12'
-        
-        # Relevant XML Calls:
-        #  PRC_LMP -        for market_run_id='DAM'
-        #  PRC_HASP_LMP     for market_run_id='HASP'
-        #  PRC_INTVL_LMP    for market_run_id='RTM'
-        #  PRC_RTPD_LMP     No longer valid?
-        
-        # Max call interval:
-        #  In the HASP and RTM markets, requesting more than the max interval length may result in the wrong data being returned.
-        # Individual nodes: <31 days
-        # Calling "ALL" or "ALL_APNODES":
-        #    DAM: 1 day, returns 4 files from expanded zip. Each has 20-line header
-        #    HASP: 1 hour, returns one file with all components (LMP, MCC, MCE, MCL)
-        #    RTM: 1 hour, returns one file with all components (LMP, MCC, MCE, MCL)
-
-        #PRC_LMP
-        # if grp_type=="ALL" or "ALL_APNODES", we are processing full node sets:
-        #   remove 'node' from the payload
-        #   can only process one time step at a time,
-        #       Time step for DAM = 1 day; time step otherwise = 1 hr
-        #       
-        # if node is not "ALL", we are dealing with a specific node:
-        #   remove grp_type from payload
-        #   Check to make sure that the date is less than 31 days or cut into pieces
-        
-        # set args
-        self.handle_options(data='load', latest=latest,
-                            start_at=start_at, end_at=end_at, market=market, grp_type=grp_type,node=node, **kwargs)
-        
-        requestSpan = self.options['end_at'] - self.options['start_at']  # This is the duration spanned by our request     
-        requestStart = self.options['start_at'] #This should be a datetime object
-        requestEnd = self.options['end_at'] # This should be a datetime object
-        print 'Request span is:',requestSpan
-        
-        # ensure market and freq are set             # What is this for?
-        if 'market' not in self.options:
-            if self.options['forecast']:
-                self.options['market'] = self.MARKET_CHOICES.dam
-            else:
-                self.options['market'] = self.MARKET_CHOICES.fivemin
-        """if 'freq' not in self.options:              # What is the frequency used for?
-            if self.options['forecast']:
-                self.options['freq'] = self.FREQUENCY_CHOICES.hourly
-            else:
-                self.options['freq'] = self.FREQUENCY_CHOICES.fivemin
-        """
-        # Clean up conflicting commands
-        # Check this: this may currently be buggy when requesting grp_type=ALL_APNODES but excluding 'node' in the call 
-        if self.options['node']=='ALL' and self.options['grp_type']!='ALL':
-            del self.options['grp_type']    # Node typically overrides the grp_type call
-            
-        
-        # Decision fork: either we are handing "all" nodes or we are handling an individual node
-        if self.options['grp_type']=='ALL' or self.options['grp_type']=='ALL_APNodes':
-            # If we are processing full node sets, need to iterate across the appropriate time blocks
-            del self.options['node']  # Get rid of node commands to ensure we aren't sending mixed signals.  This will override the node option.
-        
-            if market=='DAHR':
-                print ('The DAM LMP call is not yet implemented... you should go do that.')
-                
-            else:  # We are not in DAM, but in HASP or RTM
-                # If we are requesting all nodes in the Hour-ahead market or real-time markets, we can request at most one hour at a time
-
-                if market=='RTHR':
-                    # This is a request for the Hour-Ahead Scheduling Process (HASP)
-                    oasis_API_call= 'PRC_HASP_LMP'
-                else: #if ':market=='RTM
-                    # Assume that this is a request for the real-time market
-                    oasis_API_call= 'PRC_INTVL_LMP'
-                
-                parsed_data = [] # Placeholder
-                
-                currentStartAt = requestStart       # Initialize loop conditions
-                currentEndAt = currentStartAt
-                
-                # The contents of the following if statement can probably be refactored 
-                if requestSpan.total_seconds()>3600:
-                    timeStep = timedelta(hours=1)       # Increment by one hour each iteration
-                    currentEndAt = currentEndAt + timeStep # Priming the pump
-                    
-                    # The following loop can probably be refactored significantly
-                    while currentEndAt < requestEnd:
-                    # Set up payload, fetch data, and parse data
-                        
-                        self.options['start_at']=currentStartAt
-                        self.options['end_at']=currentEndAt
-                        payload = self.construct_oasis_payload(oasis_API_call,csv=csv)
-                        print 'Requesting data for time starting at ', (currentStartAt).strftime(self.oasis_request_time_format)
-                        startRequest = time.clock()
-                        oasis_data = self.fetch_oasis(payload=payload)
-                        endRequest = time.clock()
-                        print 'Imported data in ',endRequest-startRequest,' s'
-                        parsed_data.append(self.parse_lmp(oasis_data,csv=csv))
-                        print 'Parsed Data in ', time.clock()-endRequest,' s'
-                        currentStartAt = currentEndAt
-                        currentEndAt = currentEndAt + timeStep
-                # Previous 'if' block was to get us within one time step of the finish.  This will get us the rest of the way.
-                        
-                #Clean up final iteration to get to the end time
-                print 'Exited the loop'
-                self.options['start_at']=currentStartAt
-                self.options['end_at']=requestEnd
-                payload = self.construct_oasis_payload(oasis_API_call,csv=csv)
-                print 'Requesting data for time starting at ', (currentStartAt).strftime(self.oasis_request_time_format)
-                oasis_data = self.fetch_oasis(payload=payload)
-                parsed_data.append(self.parse_lmp(oasis_data,csv))
-                result = parsed_data
-                
-                #merge dataframes if you have been pulling csv's
-                if csv:
-                    for i in range(len(parsed_data)):
-                        if i == 0: result = parsed_data[0]
-                        else:
-                            result = result.append(parsed_data[i])
-                    result = result.unstack()
-                    result.columns = result.columns.droplevel()
-        
-        else:
-            # If we aren't handling full node sets, we are handling individual nodes and can request up to 31 days of data at a time
-            print('The single-node calls are not yet implemented... you should go do that.')
-        
-        
-        # Return either just the most recent datapoint, or return all the parsed data
-        # It seems like this could be moved to a separate function
-        # Commenting out for now because it looks like it needs a specific data structure, i.e. a dict with a 'timestamp' key
-        """
-        if self.options['latest']: 
-            # select latest
-            latest_dp = None
-            latest_ts = self.utcify('1900-01-01 12:00')
-            now = self.utcify(datetime.utcnow(), tz_name='utc')
-            for dp in parsed_data:
-                if dp['timestamp'] < now and dp['timestamp'] > latest_ts:
-                    latest_dp = dp
-                    latest_ts = dp['timestamp']
-
-            # return latest
-            if latest_dp:
-                return [latest_dp]
-            else:
-                return []
-        else:
-            # return all data
-            return parsed_data
-        """
-        return result
-
-    def parse_lmp(self,raw_data,csv=False):
-        """
-        Incoming raw_data is a list of data points, split using the <REPORT DATA> tag
-        Parse raw data output of fetch_oasis for location marginal price.
-        4 LMP components (Marginal Cost of Energy, Marginal Cost of Congestion, Marginal cost of Losses, net LMP
-        """
-        #Sample entry:
-        #<REPORT_DATA>
-        #<DATA_ITEM>LMP_PRC</DATA_ITEM>
-        #<RESOURCE_NAME>3EMIDIO_6_N001</RESOURCE_NAME>
-        #<OPR_DATE>2013-05-25</OPR_DATE>
-        #<INTERVAL_NUM>69</INTERVAL_NUM>
-        #<INTERVAL_START_GMT>2013-05-26T00:00:00-00:00</INTERVAL_START_GMT>
-        #<INTERVAL_END_GMT>2013-05-26T00:15:00-00:00</INTERVAL_END_GMT>
-        #<VALUE>27.5385</VALUE>
-        #</REPORT_DATA>
-        
-        # if using csvs, parsing just involves using parse_to_df method
-        if csv:
-            parsed_data = self.parse_to_df(raw_data,usecols=[
-            'INTERVALSTARTTIME_GMT','INTERVALENDTIME_GMT','NODE','MW','LMP_TYPE'],
-            index_col=['INTERVALSTARTTIME_GMT','INTERVALENDTIME_GMT','LMP_TYPE','NODE'],
-            parse_dates=['INTERVALSTARTTIME_GMT','INTERVALENDTIME_GMT'])
-        
-        else:
-            # set up storage
-            parsed_data = {}
-            #parsed_data = []
-            
-            # Structure of returned data: set of nested dictionaries
-            # {dict of times}
-            #   {dict of nodes}
-            #       {dict of lmp components}
-            # i.e. parsed
-            
-            # extract values from xml
-            for raw_soup_dp in raw_data:
-                # Parse the time, node name, data item, and value from the xml 
-                try:
-                    ts = self.utcify(raw_soup_dp.find('interval_start_gmt').string)
-                    node_name =raw_soup_dp.find('resource_name').string.lower()
-                    data_type = raw_soup_dp.find('data_item').string.lower()
-                    data_value = float(raw_soup_dp.find('value').string)
-                except TypeError:
-                    self.logger.error('Error in schema for CAISO OASIS result %s' % raw_soup_dp.prettify())
-                    continue
-                
-                # Make sure that our dict structure has a spot ready to recieve a new lmp value
-                if ts not in parsed_data:
-                    parsed_data[ts] = {}
-                if node_name not in parsed_data[ts]:
-                    parsed_data[ts][node_name]={}
-                
-                # store generation value
-                parsed_data[ts][node_name][data_type] = data_value # This will set MCC, MCL, MCE, or LMP to the given value
-    
-        return parsed_data
 
     def get_load(self, latest=False,
                        start_at=False, end_at=False, **kwargs):
@@ -425,8 +155,7 @@ class CAISOClient(BaseClient):
             # return all data
             return parsed_data
 
-    def construct_oasis_payload(self, queryname, preferred_start_at=None, 
-                                csv=False, **kwargs):
+    def construct_oasis_payload(self, queryname, **kwargs):
         # get start and end times
         if self.options['latest']:
             now = self.utcify(datetime.utcnow(), tz_name='utc')
@@ -445,11 +174,9 @@ class CAISOClient(BaseClient):
                    'startdatetime': (startdatetime).strftime(self.oasis_request_time_format),
                    'enddatetime': (enddatetime).strftime(self.oasis_request_time_format),
                   }
-        if csv:
-            payload.update({'resultformat' : 6})
-        print(payload)    
         payload.update(self.base_payload)
         payload.update(kwargs)
+
         # return
         return payload        
 
@@ -489,10 +216,10 @@ class CAISOClient(BaseClient):
                 continue
 
             # process both halves of page
-            for header in [1, 29]:
+            for header in [0, 0]:
                 df = self.parse_to_df(response.text,
                                     skiprows=header, nrows=24, header=header,
-                                    delimiter='\t+')
+                                    delimiter='\t+', engine='python')
 
                 # combine date with hours to index
                 indexed = self.set_dt_index(df, this_date, df['Hour'])
@@ -525,40 +252,32 @@ class CAISOClient(BaseClient):
         """Returns a list of report data elements, or an empty list if an error was encountered."""
         # set up storage
         raw_data = []
-
+ 
         # try get
         response = self.request(self.base_url_oasis, params=payload) # have request
         if not response:
             return []
-        
+            
         # read data from zip
         content = self.unzip(response.content)
         if not content:
             return []
         
-        # if downloaded xml
-        if not 'resultformat' in payload.keys():
-        # prep xml file for parsing w/ beautiful soup
-
-            # load xml into soup
-            soup = BeautifulSoup(content)
-            
-            # check xml content
-            error = soup.find('m:error')
-            if error:
-                code = error.find('m:err_code')
-                desc = error.find('m:err_desc')
-                msg = 'XML error for CAISO OASIS with payload %s: %s %s' % (payload, code, desc)
-                self.logger.error(msg)
-                raw_data = []
-                    
-            else:
-                raw_data = soup.find_all('report_data')
+        # load xml into soup
+        soup = BeautifulSoup(content)
         
-        # if downloaded csv (instead of xml), do nothing to parse
-        else: raw_data = content
-        
-        return raw_data
+        # check xml content
+        error = soup.find('m:error')
+        if error:
+            code = error.find('m:err_code')
+            desc = error.find('m:err_desc')
+            msg = 'XML error for CAISO OASIS with payload %s: %s %s' % (payload, code, desc)
+            self.logger.error(msg)
+            return []
+                
+        else:
+            raw_data = soup.find_all('report_data')
+            return raw_data
         
     def parse_oasis_renewable(self, raw_data):
         """Parse raw data output of fetch_oasis for renewables."""

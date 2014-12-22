@@ -8,6 +8,7 @@ import requests
 import pandas as pd
 import zipfile
 from StringIO import StringIO
+import time
 
 
 # named tuple for time period interval labels
@@ -223,7 +224,13 @@ class BaseClient(object):
 
         # carry out request
        # try:
-        response = getattr(session, mode)(url, verify=False, **kwargs)
+        response = None
+        while response == None:
+            try:
+                response = getattr(session, mode)(url, verify=False, timeout=None, **kwargs)
+            except:
+                print "Request failed @URL: %s. Trying again..." %url
+                time.sleep(5)
         # except requests.exceptions.ChunkedEncodingError as e:
         #     # JSON incomplete or not found
         #     msg = '%s: chunked encoding error for %s, %s:\n%s' % (self.NAME, url, kwargs, e)
